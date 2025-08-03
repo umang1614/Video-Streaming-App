@@ -2,14 +2,21 @@ package com.stream.app.controller;
 import com.stream.app.entities.Video;
 import com.stream.app.payload.CustomMessage;
 import com.stream.app.services.VideoService;
+import org.springframework.core.io.ByteArrayResource;
 import org.springframework.core.io.FileSystemResource;
+import org.springframework.core.io.InputStreamResource;
 import org.springframework.core.io.Resource;
+import org.springframework.http.HttpHeaders;
 import org.springframework.http.HttpStatus;
 import org.springframework.http.MediaType;
 import org.springframework.http.ResponseEntity;
 import org.springframework.web.bind.annotation.*;
 import org.springframework.web.multipart.MultipartFile;
 
+import java.io.IOException;
+import java.io.InputStream;
+import java.io.RandomAccessFile;
+import java.nio.file.Files;
 import java.nio.file.Path;
 import java.nio.file.Paths;
 import java.util.List;
@@ -75,18 +82,49 @@ public class VideoController {
     public ResponseEntity<Resource> streamVideoInChunks(
             @PathVariable String videoId,
             @RequestHeader(value = "Range", required = false) String range
-    ){
-        System.out.println(range);
-        Video video = videoService.get(videoId);
-        Path path = Paths.get(video.getFilePath());
-        String contentType = video.getContentType();
-        if(contentType == null){
-            contentType = "application/octet-stream";
-        }
-        Resource resource = new FileSystemResource(path);
-        long fileLength = path.toFile().length();
-        if(range == null){
-            return ResponseEntity.ok().contentType(MediaType.parseMediaType(contentType)).body(resource);
+    ) {
+        try {
+            Video video = videoService.get(videoId);
+            Path path = Paths.get(video.getFilePath());
+            String contentType = video.getContentType() != null ? video.getContentType() : "application/octet-stream";
+            long fileLength = Files.size(path);
+
+            // If no range header, return entire file
+            if (range == null) {
+                return ResponseEntity.ok()
+                        .contentType(MediaType.parseMediaType(contentType))
+                        .contentLength(fileLength)
+                        .body(new FileSystemResource(path));
+            }
+
+            // Parse the Range header
+            String[] ranges = range.trim().replace("bytes=", "").split("-");
+            long start = Long.parseLong(ranges[0]);
+            long end = (ranges.length > 1 && !ranges[1].isEmpty()) ? Long.parseLong(ranges[1]) : fileLength - 1;
+            if (end > fileLength - 1) end = fileLength - 1;
+
+            long contentLength = end - start + 1;
+            byte[] data = new byte[(int) contentLength];
+
+            // Read only the requested bytes
+            try (RandomAccessFile raf = new RandomAccessFile(path.toFile(), "r")) {
+                raf.seek(start);
+                raf.readFully(data);
+            }
+
+            HttpHeaders headers = new HttpHeaders();
+            headers.add("Content-Range", "bytes " + start + "-" + end + "/" + fileLength);
+            headers.add("Accept-Ranges", "bytes");
+            headers.setContentLength(contentLength);
+
+            return ResponseEntity.status(HttpStatus.PARTIAL_CONTENT)
+                    .headers(headers)
+                    .contentType(MediaType.parseMediaType(contentType))
+                    .body(new ByteArrayResource(data));
+
+        } catch (IOException e) {
+            return ResponseEntity.status(HttpStatus.INTERNAL_SERVER_ERROR).build();
         }
     }
+
 }
